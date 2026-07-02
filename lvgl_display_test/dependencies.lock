@@ -1,0 +1,35 @@
+dependencies:
+  esp_lcd_ili9341:
+    dependencies: []
+    source:
+      path: components/esp_lcd_ili9341
+      type: local
+    version: 2.0.2
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.5.3
+  idf:
+    source:
+      type: idf
+    version: 6.0.0
+  lvgl:
+    dependencies: []
+    source:
+      path: components/lvgl
+      type: local
+    version: 9.5.0
+direct_dependencies:
+- espressif/cmake_utilities
+- espressif/esp_lcd_ili9341
+- idf
+- lvgl/lvgl
+manifest_hash: c636da02b0322d9f9d8ee9a41d3e0c30e1ed4cc4089ebbc8c5816f3c29022c94
+target: esp32s3
+version: 3.0.0
