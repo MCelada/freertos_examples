@@ -1,0 +1,18 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "clangd.path": "/home/mcelada/.espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/mcelada/Documents/Facultad/5-TecnicasDigitales3/adc_example/build"
+  ],
+  "idf.currentSetup": "/home/mcelada/.espressif/v6.0/esp-idf",
+  "idf.flashType": "UART",
+  "idf.openOcdConfigs": [
+    "board/esp32s3-bridge.cfg"
+  ],
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32s3"
+  },
+  "idf.port": "/dev/ttyACM0"
+}

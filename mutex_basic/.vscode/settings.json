@@ -1,0 +1,11 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.extensionActivationMode": "always",
+  "clangd.path": "/home/mcelada/.espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/mcelada/Documents/Facultad/5-TecnicasDigitales3/mutex_basic/build"
+  ],
+  "idf.currentSetup": "/home/mcelada/.espressif/v6.0/esp-idf"
+}
