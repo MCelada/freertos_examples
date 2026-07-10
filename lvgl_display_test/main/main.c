@@ -18,6 +18,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "../components/lvgl/lvgl.h"
+#include <sys/lock.h>
+#include <sys/param.h>
+#include <esp_timer.h>
+#include "UI/ui.h"
 
 #define LCD_HOST    SPI2_HOST
 #define PIN_NUM_CS 5
@@ -28,103 +32,205 @@
 #define PIN_NUM_LED 14
 #define PIN_NUM_MISO 9
 
-#define LCD_H_RES 320
-#define LCD_V_RES 240
+#define LCD_H_RES 240
+#define LCD_V_RES 320
 #define LCD_PIXEL_CLOCK_HZ 20 * 1000 * 1000 //20 MHz
 #define LCD_CMD_BITS 8
 #define LCD_PARAM_BITS 8
 
-// ADDED: Static LVGL display variables (Crucial to prevent crashes!)
-static lv_display_t * display;
-
 esp_lcd_panel_io_handle_t io_handle = NULL;
 esp_lcd_panel_handle_t lcd_panel_handle = NULL;
 
-// ADDED: DMA Transfer complete callback
-static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
+static void display_init (void)
 {
-    lv_display_t * disp = (lv_display_t *)user_ctx;
+	gpio_set_direction(PIN_NUM_LED, GPIO_MODE_OUTPUT);
+	gpio_set_level(PIN_NUM_LED, 1);
+	
+	spi_bus_config_t buscfg = {
+    .sclk_io_num = PIN_NUM_SCLK,
+    .mosi_io_num = PIN_NUM_MOSI,
+    .miso_io_num = PIN_NUM_MISO,
+    .quadwp_io_num = -1,
+    .quadhd_io_num = -1,
+    .max_transfer_sz = LCD_H_RES * 80 * sizeof(uint16_t), // transfer 80 lines of pixels (assume pixel is RGB565) at most in one SPI transaction
+};
+ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO)); // Enable the DMA feature
+
+
+esp_lcd_panel_io_spi_config_t io_config = {
+    .dc_gpio_num = PIN_NUM_DC,
+    .cs_gpio_num = PIN_NUM_CS,
+    .pclk_hz = LCD_PIXEL_CLOCK_HZ,
+    .lcd_cmd_bits = LCD_CMD_BITS,
+    .lcd_param_bits = LCD_PARAM_BITS,
+    .spi_mode = 0,
+    .trans_queue_depth = 10,
+};
+// Attach the LCD to the SPI bus
+ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
+
+
+esp_lcd_panel_dev_config_t panel_config = {
+    .reset_gpio_num = PIN_NUM_RESET,
+    .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+    .bits_per_pixel = 16,
+};
+// Create LCD panel handle for ST7789, with the SPI IO device handle
+ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io_handle, &panel_config, &lcd_panel_handle));
+//ESP_ERROR_CHECK(esp_lcd_new_panel_st7735(io_handle, &panel_config, &lcd_panel_handle));
+
+esp_lcd_panel_reset(lcd_panel_handle);
+esp_lcd_panel_init(lcd_panel_handle);
+esp_lcd_panel_disp_on_off(lcd_panel_handle, true);
+}
+
+/**** LVGL START *****/
+#define LVGL_TICK_PERIOD_MS 2
+
+// LVGL library is not thread-safe, this will call LVGL APIs from different tasks, so use a mutex to protect it
+static _lock_t lvgl_api_lock;
+
+extern void my_ui(void)
+{
+	    /*Change the active screen's background color*/
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x003a57), LV_PART_MAIN);
+
+    /*Create a white label, set its text and align it to the center*/
+    lv_obj_t * label = lv_label_create(lv_screen_active());
+    lv_label_set_text(label, "Hello world");
+    lv_obj_set_style_text_color(lv_screen_active(), lv_color_hex(0xffffff), LV_PART_MAIN);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+}
+
+static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
+{
+    lv_display_t *disp = (lv_display_t *)user_ctx;
     lv_display_flush_ready(disp);
     return false;
 }
 
-static void example_lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map)
+/* Rotate display and touch, when rotated screen in LVGL. Called when driver parameters are updated. */
+static void lvgl_port_update_callback(lv_display_t *disp)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) lv_display_get_user_data(disp);
-    
-    // LVGL v9 passes the color map as a uint8_t pointer, we can pass it directly to the ESP-IDF driver
-    esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, (void *)px_map);
+    esp_lcd_panel_handle_t panel_handle = lv_display_get_user_data(disp);
+    lv_display_rotation_t rotation = lv_display_get_rotation(disp);
+
+    switch (rotation) {
+    case LV_DISPLAY_ROTATION_0:
+        // Rotate LCD display
+        esp_lcd_panel_swap_xy(panel_handle, false);
+        esp_lcd_panel_mirror(panel_handle, true, false);
+        break;
+    case LV_DISPLAY_ROTATION_90:
+        // Rotate LCD display
+        esp_lcd_panel_swap_xy(panel_handle, true);
+        esp_lcd_panel_mirror(panel_handle, true, true);
+        break;
+    case LV_DISPLAY_ROTATION_180:
+        // Rotate LCD display
+        esp_lcd_panel_swap_xy(panel_handle, false);
+        esp_lcd_panel_mirror(panel_handle, false, true);
+        break;
+    case LV_DISPLAY_ROTATION_270:
+        // Rotate LCD display
+        esp_lcd_panel_swap_xy(panel_handle, true);
+        esp_lcd_panel_mirror(panel_handle, false, false);
+        break;
+    }
 }
 
-static void display_init(void)
+static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
-    gpio_set_direction(PIN_NUM_LED, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_NUM_LED, 1); // Turn on the backlight
+    lvgl_port_update_callback(disp);
+    esp_lcd_panel_handle_t panel_handle = lv_display_get_user_data(disp);
+    int offsetx1 = area->x1;
+    int offsetx2 = area->x2;
+    int offsety1 = area->y1;
+    int offsety2 = area->y2;
+    // because SPI LCD is big-endian, we need to swap the RGB bytes order
+    lv_draw_sw_rgb565_swap(px_map, (offsetx2 + 1 - offsetx1) * (offsety2 + 1 - offsety1));
+    // copy a buffer's content to a specific area of the display
+    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+}
 
-    spi_bus_config_t buscfg = {
-        .sclk_io_num = PIN_NUM_SCLK,
-        .mosi_io_num = PIN_NUM_MOSI,
-        .miso_io_num = PIN_NUM_MISO,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_H_RES * 80 * sizeof(uint16_t),
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
+static void lvgl_tick(void *arg)
+{
+    /* Tell LVGL how many milliseconds has elapsed */
+    lv_tick_inc(LVGL_TICK_PERIOD_MS);
+}
 
-    // 1. Create the LVGL Display Object FIRST
-    display = lv_display_create(LCD_H_RES, LCD_V_RES);
-
-    esp_lcd_panel_io_spi_config_t io_config = {
-        .dc_gpio_num = PIN_NUM_DC,
-        .cs_gpio_num = PIN_NUM_CS,
-        .pclk_hz = LCD_PIXEL_CLOCK_HZ,
-        .lcd_cmd_bits = LCD_CMD_BITS,
-        .lcd_param_bits = LCD_PARAM_BITS,
-        .spi_mode = 0,
-        .trans_queue_depth = 10,
-        .on_color_trans_done = example_notify_lvgl_flush_ready,
-        .user_ctx = display, // Pass the v9 display object here!
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
-
-    esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = PIN_NUM_RESET,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
-        .bits_per_pixel = 16,
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io_handle, &panel_config, &lcd_panel_handle));
-
-    esp_lcd_panel_reset(lcd_panel_handle);
-    esp_lcd_panel_init(lcd_panel_handle);
-    esp_lcd_panel_disp_on_off(lcd_panel_handle, true);
-
-    // 2. Link the ESP-IDF panel handle to LVGL
-    lv_display_set_user_data(display, lcd_panel_handle);
-
-    // 3. Set the flush callback
-    lv_display_set_flush_cb(display, example_lvgl_flush_cb);
-
-    // 4. Allocate memory and set the draw buffers
-    size_t draw_buffer_sz = LCD_H_RES * 80 * sizeof(uint16_t);
-    void *buf1 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_DMA);
-    assert(buf1);
-    
-    // In v9, setting buffers is a single function call
-    lv_display_set_buffers(display, buf1, NULL, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
+static void lvgl_port_task(void *arg)
+{
+    uint32_t time_till_next_ms = 0;
+    uint32_t time_threshold_ms = 2000 / CONFIG_FREERTOS_HZ;
+    while (1) {
+        _lock_acquire(&lvgl_api_lock);
+        time_till_next_ms = lv_timer_handler();
+        _lock_release(&lvgl_api_lock);
+        // in case of triggering a task watch dog time out
+        time_till_next_ms = MAX(time_till_next_ms, time_threshold_ms);
+        vTaskDelay(time_till_next_ms);
+    }
 }
 
 void app_main(void)
 {
+	display_init();
+	
+		  /*Initialize LVGL library*/
     lv_init();
-    display_init();
-    esp_lcd_panel_swap_xy(lcd_panel_handle, true); // Swap X and Y axes for portrait mode
-    esp_lcd_panel_draw_bitmap(lcd_panel_handle, 0, 0, 100, 50, NULL); // Clear the screen
-    lv_example_image_2();
+
+    // create a lvgl display
+    lv_display_t *display = lv_display_create(LCD_H_RES, LCD_V_RES);
+
+    // alloc draw buffers used by LVGL
+    // it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized
+    size_t draw_buffer_sz = LCD_H_RES * 20 * sizeof(lv_color16_t);
+    void *buf1 = spi_bus_dma_memory_alloc(LCD_HOST, draw_buffer_sz, 0);
+    void *buf2 = spi_bus_dma_memory_alloc(LCD_HOST, draw_buffer_sz, 0);
+
+    // initialize LVGL draw buffers
+    lv_display_set_buffers(display, buf1, buf2, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
     
-    while (1)
-    {
-        lv_tick_inc(10);
-        lv_task_handler(); // (Note: you can also use lv_timer_handler() here)
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+    // associate the mipi panel handle to the display
+    lv_display_set_user_data(display, lcd_panel_handle);
+    
+    // set color depth
+    lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
+    
+    // set the callback which can copy the rendered image to an area of the display
+    lv_display_set_flush_cb(display, lvgl_flush_cb);
+    
+    lv_display_set_rotation(display, LV_DISPLAY_ROTATION_270);
+
+    /*nstall LVGL tick timer*/
+    // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
+    const esp_timer_create_args_t lvgl_tick_timer_args = {
+        .callback = &lvgl_tick,
+        .name = "lvgl_tick"
+    };
+    esp_timer_handle_t lvgl_tick_timer = NULL;
+    ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, LVGL_TICK_PERIOD_MS * 1000));
+
+    /*Register io panel event callback for LVGL flush ready notification*/
+    const esp_lcd_panel_io_callbacks_t cbs = {
+        .on_color_trans_done = notify_lvgl_flush_ready,
+    };
+    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io_handle, &cbs, display));
+    
+
+	/* Run the UI */
+    // Lock the mutex due to the LVGL APIs are not thread-safe
+    _lock_acquire(&lvgl_api_lock);
+    ui_init();
+    _lock_release(&lvgl_api_lock);
+    
+    /*Create LVGL task*/
+    xTaskCreate(lvgl_port_task, "LVGL", 4*4096, NULL, 2, NULL);
+	
+	while (1)
+	{
+		vTaskDelay(1000/portTICK_PERIOD_MS);
+	}
 }
